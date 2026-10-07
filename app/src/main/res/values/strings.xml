@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Auto Wireless ADB</string>
+    <string name="accessibility_service_description">Автоматичне увімкнення бездротового налагодження після перезавантаження пристрою.</string>
+</resources>
