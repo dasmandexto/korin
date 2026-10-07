@@ -1,6 +1,8 @@
 package com.autoadb.enabler
 
+import android.accessibilityservice.AccessibilityService
 import android.app.Activity
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
@@ -15,6 +17,7 @@ import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 
 class MainActivity : Activity() {
 
@@ -26,7 +29,6 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Обробка переданих інтентом налаштувань
         handleIncomingIntent(intent)
 
         val rootLayout = LinearLayout(this).apply {
@@ -53,11 +55,16 @@ class MainActivity : Activity() {
             textSize = 12f
             setTextColor(Color.parseColor("#8E9AA8"))
             setPadding(0, 10, 0, 15)
+            setOnClickListener {
+                if (!isAccessibilityServiceEnabled(this@MainActivity)) {
+                    openAccessibilitySettings()
+                }
+            }
         }
         rootLayout.addView(statusText)
         updateStatusText()
 
-        // Горизонтальний ряд кнопок швидких дій
+        // Ряд кнопок
         val buttonsScroll = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
         }
@@ -66,7 +73,18 @@ class MainActivity : Activity() {
         }
 
         val btnWireless = createActionButton("▶ Wireless ADB", "#2563EB") {
-            TerminalManager.log("[Action] Запуск активації Wireless ADB...")
+            if (!isAccessibilityServiceEnabled(this)) {
+                TerminalManager.log("⚠️ [УВАГА] Служба доступності (Accessibility) ВИМКНЕНА!")
+                TerminalManager.log("Автоматичні кліки не працюватимуть, доки служба вимкнена.")
+                TerminalManager.log("👉 Увімкніть її в Спеціальних можливостях або через ADB:")
+                TerminalManager.log("adb shell settings put secure enabled_accessibility_services com.autoadb.enabler/.AdbEnablerAccessibilityService")
+                TerminalManager.log("adb shell settings put secure accessibility_enabled 1")
+                Toast.makeText(this, "Увімкніть службу доступності для KORIN!", Toast.LENGTH_LONG).show()
+                openAccessibilitySettings()
+                return@createActionButton
+            }
+
+            TerminalManager.log("[Action] Запуск авто-активації Wireless ADB...")
             AdbEnablerAccessibilityService.isTriggered = true
             val intent = Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
@@ -75,12 +93,15 @@ class MainActivity : Activity() {
         }
 
         val btnUsb = createActionButton("▶ USB ADB", "#059669") {
-            TerminalManager.log("[Action] Примусова активація USB Debugging...")
+            TerminalManager.log("[Action] Встановлення прапорця 'Налагодження по USB' (adb_enabled=1)...")
             try {
                 Settings.Global.putInt(contentResolver, Settings.Global.ADB_ENABLED, 1)
-                TerminalManager.log("[USB] adb_enabled успішно виставлено в 1")
+                TerminalManager.log("✅ [USB] adb_enabled успішно виставлено в 1 (USB Debugging увімкнено)")
+                Toast.makeText(this, "USB ADB активовано!", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
-                TerminalManager.log("[USB] Помилка: ${e.message} (потрібен дозвіл WRITE_SECURE_SETTINGS)")
+                TerminalManager.log("❌ [USB] Помилка: ${e.message}")
+                TerminalManager.log("Потрібен дозвіл через ПК: adb shell pm grant com.autoadb.enabler android.permission.WRITE_SECURE_SETTINGS")
+                Toast.makeText(this, "Потрібен дозвіл WRITE_SECURE_SETTINGS!", Toast.LENGTH_LONG).show()
             }
             updateStatusText()
         }
@@ -88,7 +109,7 @@ class MainActivity : Activity() {
         val btnSsh = createActionButton("▶ SSH Connect", "#D97706") {
             val addr = AdbEnablerAccessibilityService.lastCapturedAddress
             val port = addr?.split(":")?.getOrNull(1)?.toIntOrNull() ?: 5555
-            TerminalManager.log("[Action] Спроба підключення SSH тунелю на локальний порт $port...")
+            TerminalManager.log("[Action] Спроба підключення SSH тунелю на порт $port...")
             SshTunnelService.startTunnel(this, port)
         }
 
@@ -104,7 +125,7 @@ class MainActivity : Activity() {
         buttonsScroll.addView(buttonsRow)
         rootLayout.addView(buttonsScroll)
 
-        // Вбудований Термінал
+        // Термінал
         val terminalFrame = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.parseColor("#050505"))
@@ -135,14 +156,14 @@ class MainActivity : Activity() {
         terminalFrame.addView(terminalScrollView)
         rootLayout.addView(terminalFrame)
 
-        // Блок вводу команди
+        // Поле команд
         val inputRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
 
         commandInput = EditText(this).apply {
-            hint = "Введіть команду (наприклад, getprop, ip a, ps)..."
+            hint = "Команда (getprop, ip a, ps)..."
             setHintTextColor(Color.parseColor("#4B5563"))
             setTextColor(Color.WHITE)
             textSize = 13f
@@ -175,7 +196,6 @@ class MainActivity : Activity() {
 
         setContentView(rootLayout)
 
-        // Підписка на потоковий вивід логів
         TerminalManager.addListener { text ->
             terminalOutput.append(text)
             terminalScrollView.post {
@@ -183,13 +203,49 @@ class MainActivity : Activity() {
             }
         }
 
-        TerminalManager.log("⚡ KORIN ініціалізовано. Термінал готовий до роботи.")
+        TerminalManager.log("⚡ KORIN ініціалізовано.")
+        if (!isAccessibilityServiceEnabled(this)) {
+            TerminalManager.log("⚠️ Служба доступності наразі ВИМКНЕНА.")
+            TerminalManager.log("Для авто-кліків тумблерів увімкніть її в Спеціальних можливостях.")
+        } else {
+            TerminalManager.log("🟢 Служба доступності активна і готова до автоматизації.")
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateStatusText()
     }
 
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         handleIncomingIntent(intent)
         updateStatusText()
+    }
+
+    private fun openAccessibilitySettings() {
+        try {
+            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Відкрийте Налаштування -> Спеціальні можливості", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun isAccessibilityServiceEnabled(context: Context): Boolean {
+        val expected = ComponentName(context, AdbEnablerAccessibilityService::class.java).flattenToString()
+        val enabledServices = Settings.Secure.getString(
+            context.contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ) ?: return false
+        val isGloballyOn = Settings.Secure.getInt(
+            context.contentResolver,
+            Settings.Secure.ACCESSIBILITY_ENABLED,
+            0
+        )
+        return isGloballyOn == 1 && enabledServices.contains(expected)
     }
 
     private fun handleIncomingIntent(intent: Intent?) {
@@ -250,7 +306,7 @@ class MainActivity : Activity() {
         val prefs = getSharedPreferences("korin_config", Context.MODE_PRIVATE)
         val host = prefs.getString("ssh_host", "не вказано")
         val rPort = prefs.getInt("remote_port", 5555)
-        val lastAddr = AdbEnablerAccessibilityService.lastCapturedAddress ?: "не активовано"
+        val lastAddr = AdbEnablerAccessibilityService.lastCapturedAddress ?: "не знайдено"
 
         val isUsbOn = try {
             Settings.Global.getInt(contentResolver, Settings.Global.ADB_ENABLED, 0) == 1
@@ -258,7 +314,10 @@ class MainActivity : Activity() {
             false
         }
 
-        statusText.text = "USB ADB: ${if (isUsbOn) "🟢 ON" else "🔴 OFF"} | Wireless ADB: $lastAddr\nSSH Домен: $host (порт $rPort)"
+        val isAccOn = isAccessibilityServiceEnabled(this)
+        val accStatus = if (isAccOn) "🟢 АКТИВНА" else "🔴 ВИМКНЕНА (натисніть)"
+
+        statusText.text = "Служба доступності: $accStatus\nUSB ADB: ${if (isUsbOn) "🟢 ON" else "🔴 OFF"} | Wireless ADB: $lastAddr\nSSH: $host (порт $rPort)"
     }
 
     private fun createActionButton(label: String, colorHex: String, onClick: () -> Unit): Button {

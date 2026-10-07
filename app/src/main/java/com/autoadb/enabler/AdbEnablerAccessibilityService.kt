@@ -17,14 +17,18 @@ class AdbEnablerAccessibilityService : AccessibilityService() {
         @Volatile
         var isTriggered = false
         var lastCapturedAddress: String? = null
+        var isRunning = false
     }
 
     private val handler = Handler(Looper.getMainLooper())
     private val ipPortPattern = Pattern.compile("(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}):(\\d{4,5})")
+    private var scrollAttempts = 0
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        isRunning = true
         Log.i(TAG, "Accessibility Service підключено")
+        TerminalManager.log("🟢 Служба доступності KORIN успішно активна в системі")
         serviceInfo = AccessibilityServiceInfo().apply {
             eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
                          AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
@@ -35,6 +39,11 @@ class AdbEnablerAccessibilityService : AccessibilityService() {
         }
     }
 
+    override fun onDestroy() {
+        isRunning = false
+        super.onDestroy()
+    }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (!isTriggered) return
 
@@ -43,34 +52,34 @@ class AdbEnablerAccessibilityService : AccessibilityService() {
         // 1. Обробка діалогів підтвердження ("Завжди дозволяти в цій мережі")
         handleConfirmationDialog(rootNode)
 
-        // 2. Варіант А: Перевірка та ввімкнення USB Debugging, якщо раптом вимкнений
+        // 2. Варіант А: Перевірка та ввімкнення USB Debugging
         handleUsbDebuggingToggle(rootNode)
 
-        // 3. Варіант Б: Пошук та активація Wireless Debugging
-        handleWirelessDebuggingToggle(rootNode)
+        // 3. Варіант Б: Пошук та активація Wireless Debugging (з авто-скролом)
+        handleWirelessDebugging(rootNode)
 
         // 4. Зчитування IP:Port
         findAndSaveIpPort(rootNode)
     }
 
     private fun handleConfirmationDialog(root: AccessibilityNodeInfo) {
-        val alwaysAllowNodes = findNodesByTexts(root, listOf(
+        val alwaysAllowNodes = findNodesByKeywords(root, listOf(
             "always allow", "завжди дозволяти", "всегда разрешать"
         ))
         for (node in alwaysAllowNodes) {
             if (node.isCheckable && !node.isChecked) {
                 node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                Log.i(TAG, "Встановлено прапорець 'Завжди дозволяти'")
+                TerminalManager.log("[Accessibility] Встановлено прапорець 'Завжди дозволяти в цій мережі'")
             }
         }
 
-        val allowButtonNodes = findNodesByTexts(root, listOf(
+        val allowButtonNodes = findNodesByKeywords(root, listOf(
             "allow", "дозволити", "разрешить", "ok"
         ))
         for (node in allowButtonNodes) {
             if (node.isClickable) {
                 node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                Log.i(TAG, "Натиснуто кнопку підтвердження")
+                TerminalManager.log("[Accessibility] Натиснуто кнопку підтвердження (Allow)")
             }
         }
     }
@@ -81,39 +90,67 @@ class AdbEnablerAccessibilityService : AccessibilityService() {
             "налагодження по usb",
             "отладка по usb"
         )
-        val targetNodes = findNodesByTexts(root, usbKeywords)
+        val targetNodes = findNodesByKeywords(root, usbKeywords)
         for (textNode in targetNodes) {
-            // Переконуємось, що це саме USB налагодження, а не Wireless
-            val text = textNode.text?.toString()?.lowercase() ?: ""
-            if (text.contains("wireless") || text.contains("бездротов") || text.contains("беспроводн")) {
+            val text = (textNode.text?.toString() ?: "").lowercase()
+            if (text.contains("wireless") || text.contains("бездротов") || text.contains("беспроводн") || text.contains("wi-fi")) {
                 continue
             }
             val switchNode = findSwitchInHierarchy(textNode)
             if (switchNode != null && switchNode.isCheckable && !switchNode.isChecked) {
                 switchNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                Log.i(TAG, "[Варіант А] Увімкнено перемикач USB Debugging")
+                TerminalManager.log("[Accessibility] [USB] Увімкнено тумблер USB Debugging")
             }
         }
     }
 
-    private fun handleWirelessDebuggingToggle(root: AccessibilityNodeInfo) {
+    private fun handleWirelessDebugging(root: AccessibilityNodeInfo) {
         val targetKeywords = listOf(
             "wireless debugging",
             "бездротове налагодження",
-            "беспроводная отладка"
+            "беспроводная отладка",
+            "налагодження по wi-fi",
+            "отладка по wi-fi",
+            "wireless debug"
         )
 
-        val targetNodes = findNodesByTexts(root, targetKeywords)
+        val targetNodes = findNodesByKeywords(root, targetKeywords)
 
-        for (textNode in targetNodes) {
+        if (targetNodes.isNotEmpty()) {
+            val textNode = targetNodes.first()
             val switchNode = findSwitchInHierarchy(textNode)
+
             if (switchNode != null) {
                 if (switchNode.isCheckable && !switchNode.isChecked) {
                     switchNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    Log.i(TAG, "[Варіант Б] Увімкнено тумблер Wireless Debugging")
+                    TerminalManager.log("[Accessibility] ⚡ Увімкнено тумблер Wireless Debugging")
+                } else if (switchNode.isChecked) {
+                    // Вже увімкнено, спробуємо клікнути рядок щоб відкрити деталі з портом
+                    textNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 }
-            } else if (textNode.isClickable) {
+            } else {
+                // Якщо поруч нема тумблера, клікаємо на сам рядок (відкриття підменю)
                 textNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                TerminalManager.log("[Accessibility] Відкрито сторінку Wireless Debugging")
+            }
+        } else {
+            // Якщо на поточному екрані не знайдено — гортаємо список вниз (до 6 разів)
+            if (scrollAttempts < 6) {
+                val scrollable = findFirstScrollableNode(root)
+                if (scrollable != null) {
+                    scrollAttempts++
+                    TerminalManager.log("[Accessibility] Гортаємо список вниз ($scrollAttempts/6)...")
+                    scrollable.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+                }
+            }
+        }
+
+        // Перевіряємо головний перемикач на підсторінці Wireless Debugging (якщо зайшли в середину)
+        val mainSwitches = findMainSubpageSwitch(root)
+        for (sw in mainSwitches) {
+            if (sw.isCheckable && !sw.isChecked) {
+                sw.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                TerminalManager.log("[Accessibility] Увімкнено головний перемикач на сторінці Wireless Debugging")
             }
         }
     }
@@ -128,14 +165,14 @@ class AdbEnablerAccessibilityService : AccessibilityService() {
                 val fullAddress = matcher.group(0)
                 if (fullAddress != null && fullAddress != lastCapturedAddress) {
                     lastCapturedAddress = fullAddress
-                    Log.i(TAG, "Знайдено Wireless ADB адресу: $fullAddress")
-                    TerminalManager.log("⚡ Знайдено Wireless ADB: $fullAddress")
+                    scrollAttempts = 0
+                    TerminalManager.log("🎉 Знайдено Wireless ADB адресу: $fullAddress")
 
                     handler.post {
                         Toast.makeText(applicationContext, "ADB готовий: $fullAddress", Toast.LENGTH_LONG).show()
                     }
 
-                    // Витягуємо локальний порт і запускаємо SSH тунель
+                    // Витягуємо порт і підключаємо SSH тунель
                     val port = matcher.group(2)?.toIntOrNull() ?: 0
                     if (port > 0) {
                         SshTunnelService.startTunnel(applicationContext, port)
@@ -150,12 +187,34 @@ class AdbEnablerAccessibilityService : AccessibilityService() {
 
     private fun finishAutomation() {
         isTriggered = false
+        scrollAttempts = 0
         handler.postDelayed({
             performGlobalAction(GLOBAL_ACTION_BACK)
             handler.postDelayed({
                 performGlobalAction(GLOBAL_ACTION_HOME)
             }, 300)
         }, 500)
+    }
+
+    private fun findFirstScrollableNode(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        if (node == null) return null
+        if (node.isScrollable) return node
+        for (i in 0 until node.childCount) {
+            val child = findFirstScrollableNode(node.getChild(i))
+            if (child != null) return child
+        }
+        return null
+    }
+
+    private fun findMainSubpageSwitch(root: AccessibilityNodeInfo): List<AccessibilityNodeInfo> {
+        val result = mutableListOf<AccessibilityNodeInfo>()
+        val keywords = listOf("use wireless debugging", "використовувати бездротове", "использовать беспроводную")
+        val nodes = findNodesByKeywords(root, keywords)
+        for (n in nodes) {
+            val sw = findSwitchInHierarchy(n)
+            if (sw != null) result.add(sw)
+        }
+        return result
     }
 
     private fun findSwitchInHierarchy(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
@@ -179,14 +238,25 @@ class AdbEnablerAccessibilityService : AccessibilityService() {
         return null
     }
 
-    private fun findNodesByTexts(root: AccessibilityNodeInfo, keywords: List<String>): List<AccessibilityNodeInfo> {
+    private fun findNodesByKeywords(root: AccessibilityNodeInfo?, keywords: List<String>): List<AccessibilityNodeInfo> {
         val result = mutableListOf<AccessibilityNodeInfo>()
-        for (kw in keywords) {
-            val found = root.findAccessibilityNodeInfosByText(kw)
-            if (found != null) {
-                result.addAll(found)
+        if (root == null) return result
+
+        fun traverse(node: AccessibilityNodeInfo?) {
+            if (node == null) return
+            val text = (node.text?.toString() ?: node.contentDescription?.toString() ?: "").lowercase()
+            for (kw in keywords) {
+                if (text.contains(kw)) {
+                    result.add(node)
+                    break
+                }
+            }
+            for (i in 0 until node.childCount) {
+                traverse(node.getChild(i))
             }
         }
+
+        traverse(root)
         return result
     }
 
